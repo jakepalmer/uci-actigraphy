@@ -47,6 +47,11 @@ completeFun <- function(data, desiredCols) {
     return(data[completeVec, ])
 }
 
+timeCheck <- function(time_val, date.format = "%I:%M:%S %p") {
+    tryCatch(!is.na(as.Date(time_val, date.format)),  
+             error = function(err) {FALSE})  
+}
+
 # Get list of files to be processed
 file_list <- Sys.glob("*_trimmed.csv")
 
@@ -58,7 +63,10 @@ fit <- lapply(file_list, function (file) {
     df_subj <- read.csv(file)
     perc_miss <- mean(is.na(df_subj$Activity)) * 100
     df_subj <- completeFun(df_subj, 'Activity')
-    df_subj$Time <- format(strptime(df_subj$Time, "%I:%M:%S %p"), format = "%H:%M:%S")
+    time_val <- df_subj$Time[1]
+    if (timeCheck(time_val)) {
+        df_subj$Time <- format(strptime(df_subj$Time, "%I:%M:%S %p"), format = "%H:%M:%S")
+    }
     df_subj$hrs <- as.numeric(format(strptime(df_subj$Time, "%H:%M:%S"), format = "%H"))
     df_subj$min <- as.numeric(format(strptime(df_subj$Time, "%H:%M:%S"), format = "%M"))
     df_subj$ss <- as.numeric(format(strptime(df_subj$Time, "%H:%M:%S"), format = "%S"))
