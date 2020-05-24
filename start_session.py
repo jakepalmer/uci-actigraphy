@@ -7,7 +7,7 @@ import os
 # http://ropenscilabs.github.io/r-docker-tutorial/
 
 # Edit as needed
-docker_img = "jpalm070/uci-actigraphy:v0"
+docker_img = "jpalm070/uci-actigraphy:v1"
 env = "UCIactig"
 #-----
 
@@ -30,7 +30,8 @@ print(f"""
 """)
 
 docker_cmd = f"""docker run --rm -p 8787:8787 -e USER={env} -e PASSWORD={env} -e ROOT=TRUE \
+-v {local_dir}:/home/{env} \
 -v {local_dir}/data:/home/{env}/data \
--v {local}/src:/home/{env}/src {docker_img}"""
+-v {local_dir}/src:/home/{env}/src {docker_img}"""
 
 docker_run = os.system(docker_cmd)

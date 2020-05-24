@@ -2,12 +2,10 @@
 # Actigraphy GAM fitting
 # Created by: Jake Palmer
 # Email: jake.palmer@sydney.edu.au
-# Last edit: 13.10.2019
+# Last edit: 23.05.2020
 ##########
 
-#####
-# INSTRUCTIONS
-#####
+#----- INSTRUCTIONS
 # See associated documentation file - UCIactigraphy_GAMfit_documentation.html
 
 # INPUT:
@@ -17,108 +15,293 @@
 # - Diagnostic plots per file
 # - File with collated output variables for each file included in the analysis batch
 
-#####
-# GAM FITTING
-#####
+#----- FUNCTIONS
+# The functions are seperated into 3 broad steps:
+# 1. data prep
+# 2. model fitting
+# 3. plotting
+# There are a number of low-level functions that contribute to each step. These low-level functions
+# are combined in a function to wrap each of the above steps. Therefore the structure of this script is:
+# - low-level data prep functions
+# - wrapper of low-level data prep functions
+# - low-level model fitting functions
+# - wrapper of low-level model fitting functions
+# - low-level plotting functions
+# - wrapper of low-level model fitting functions
+# - setup for analysis
+# - loop over each file running each step with wrapper functions
 
-setwd('/Users/mq44848301/Desktop')
+#----- SETUP
 
-check.packages <- function(pkg){
-    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
-    if (length(new.pkg)) 
-        install.packages(new.pkg, dependencies = TRUE)
-    sapply(pkg, library, character.only = TRUE)
+# Check if required packages are installed, load if so, install if not
+check.packages <- function(pkg) {
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE)
+  }
+  sapply(pkg, library, character.only = TRUE)
 }
-packages <- c("dplyr", "lubridate", "ggplot2", "gratia", "mgcv")
-check.packages(packages)
+
 
 # Create empty dataframe for output
-df_out <- data.frame(matrix(ncol = 7, nrow = 0))
-cols <- c("Subject", "UPslope_time", "UPslope", "DOWNslope_time",
-          "DOWNslope", "rsq", "percent_missing")
-colnames(df_out) <- cols
-suppressWarnings(write.table(df_out, "GAMfit_output.csv", sep = ",",
-            col.names = TRUE, append = TRUE,
-            row.names = FALSE))
+create_output <- function(fname, cols) {
+  df_out <- data.frame(matrix(ncol = length(cols), nrow = 0))
+  colnames(df_out) <- cols
+  suppressWarnings(
+    if (!file.exists(fname)) {
+      write.table(df_out, fname,
+        sep = ",",
+        col.names = TRUE, append = TRUE, row.names = TRUE
+      )
+    }
+  )
+  assign("df_out", df_out, envir = .GlobalEnv)
+}
 
-# Function to be used to drop missing data
+
+# Save plots to jpg easily
+save_plot <- function(fname, plot) {
+  ggsave(fname, plot = plot, device = "jpeg", width = 8, height = 6, units = "in")
+}
+
+
+#----- 1. Data prep
+
+# Drop rows with missing data
 completeFun <- function(data, desiredCols) {
-    completeVec <- complete.cases(data[, desiredCols])
-    return(data[completeVec, ])
+  completeVec <- complete.cases(data[, desiredCols])
+  return(data[completeVec, ])
 }
 
-timeCheck <- function(time_val, date.format = "%I:%M:%S %p") {
-    tryCatch(!is.na(as.Date(time_val, date.format)),  
-             error = function(err) {FALSE})  
+
+# Drop missing and calculate % missing for output
+handle_missing <- function(df) {
+  perc_miss <- mean(is.na(df$Activity)) * 100
+  assign("perc_miss", perc_miss, envir = .GlobalEnv)
+  df <- completeFun(df, "Activity")
+  return(df)
 }
+
+
+# Check the format of time variables, reformat if needed
+timeCheck <- function(time_val, date.format = "%I:%M:%S %p") {
+  tryCatch(!is.na(as.Date(time_val, date.format)),
+    error = function(err) {
+      FALSE
+    }
+  )
+}
+
+
+# Convert from H:M:S to numeric representation of time and
+# shift time axis for model fitting. Value of min_time represents
+# the earliest time on x-axis (e.g. if min_time = 3.00 then earliest
+# time on x-axis will be 03:00).
+time_HMS_to_numeric <- function(df, min_time, col) {
+  df$hrs <- as.numeric(format(strptime(df[[col]], "%H:%M:%S"), format = "%H"))
+  df$min <- as.numeric(format(strptime(df[[col]], "%H:%M:%S"), format = "%M"))
+  df$ss <- as.numeric(format(strptime(df[[col]], "%H:%M:%S"), format = "%S"))
+  df$timehour <- df$hrs + (df$min / 60)
+  df$timehour <- round(df$timehour, 2)
+  df$timehour_shifted <- ifelse(df$timehour < min_time, df$timehour + 24, df$timehour)
+  return(df)
+}
+
+
+# Calculate log(Activity) and aggregate by mean
+aggLog <- function(df) {
+  df$LogActivity <- log10(df$Activity + 1)
+  df <- df %>%
+    group_by(timehour_shifted) %>%
+    summarise(agglogActivity = mean(LogActivity))
+  return(df)
+}
+
+
+# WRAPPER for PREP STEPS
+prep_data <- function(df) {
+  df <- handle_missing(df)
+  if (timeCheck(df$Time[1])) {
+    df$Time <- format(strptime(df$Time, "%I:%M:%S %p"), format = "%H:%M:%S")
+  }
+  df <- time_HMS_to_numeric(df, min_time = 3.0, "Time")
+  df <- aggLog(df)
+  return(df)
+}
+
+
+#----- 2. Model fitting
+
+
+# Fit GAM
+fit_model <- function(formula, df) {
+  mod <- gam(formula, data = df, method = "REML")
+  rsq <- summary(mod)
+  rsq <- rsq$r.sq
+  assign("rsq", rsq, envir = .GlobalEnv)
+  return(mod)
+}
+
+
+# Calculate UP/DOWN slope values and times
+calc_slope <- function(df, mod) {
+  # n_deriv <- nrow(df) / 2
+  n_deriv <- nrow(df)
+  first_deriv <- gratia::derivatives(mod, type = "central", n = n_deriv, order = 1)
+  UP <- first_deriv[which.max(first_deriv$derivative), ]
+  UPslope <- UP$derivative
+  UPtime <- UP$data
+  DOWN <- first_deriv[which.min(first_deriv$derivative), ]
+  DOWNslope <- DOWN$derivative
+  DOWNtime <- DOWN$data
+  assign("UPslope", UPslope, envir = .GlobalEnv)
+  assign("UPtime", UPtime, envir = .GlobalEnv)
+  assign("DOWNslope", DOWNslope, envir = .GlobalEnv)
+  assign("DOWNtime", DOWNtime, envir = .GlobalEnv)
+}
+
+
+# Calulate turning points from second derivative
+calc_turn_points <- function(df, mod) {
+  # smoothed_vals <- predict(gam_mod, newdata = df)
+  df$smoothed_vals <- predict(mod, newdata = df)
+  turns <- pastecs::turnpoints(as.numeric(df$smoothed_vals))
+  peaks_time <- df$timehour_shifted[extract(turns, no.tp = FALSE, peak = TRUE, pit = FALSE)]
+  first_peak <- min(peaks_time)
+  last_peak <- max(peaks_time)
+  assign("first_peak", first_peak, envir = .GlobalEnv)
+  assign("last_peak", last_peak, envir = .GlobalEnv)
+}
+
+
+# Write output
+write_output <- function(outfile) {
+  df_out <- rbind(df_out, c(
+    subj, round(UPtime, 2), round(UPslope, 2), round(DOWNtime, 2),
+    round(DOWNslope, 2), round(first_peak, 2), round(last_peak, 2),
+    round(rsq, 2), round(perc_miss, 2)
+  ))
+  write.table(df_out, outfile, sep = ",", col.names = FALSE, append = TRUE, row.names = FALSE)
+}
+
+
+# WRAPPER for MODEL FITTING
+modelling <- function(df) {
+  mod <- fit_model(formula = agglogActivity ~ s(timehour_shifted), df = df_agg)
+  calc_slope(df_agg, mod)
+  calc_turn_points(df_agg, mod)
+  write_output(outfile)
+  p_check <- appraise(mod)
+  p_check_fname <- paste0(subj, "_GAMcheck.jpg")
+  save_plot(p_check_fname, p_check)
+  assign("gam_mod", mod, envir = .GlobalEnv)
+}
+
+
+#----- 3. Plotting
+
+
+# Function to return basic features of the plot
+base_plot <- function(df, x, y, smoothed_vals) {
+  p <- df %>%
+    ggplot(aes(x = x, group = 1)) +
+    geom_point(aes(y = y), size = 1, alpha = 0.5, na.rm = TRUE) +
+    geom_line(aes(y = smoothed_vals), colour = "red") +
+    theme_classic() +
+    xlab(paste0("Time (", round(min(x), 0), " to ", round(max(x), 0), ")")) +
+    ylab("log(Activity)")
+  return(p)
+}
+
+
+# Plot with shaded habitual sleep periods, builds on base plot
+plot_w_sleeptimes <- function(df, x, y, smoothed_vals) {
+  sleep_data <- read.csv("SPRiNT_actigraphy SLEEP.csv") %>% filter(ID == subj)
+  sleep_data <- time_HMS_to_numeric(sleep_data, min_time = 3.0, "Sleep_Onset_Time")
+  sleep_data <- sleep_data %>% rename(Sleep_Onset_Time_shifted = timehour_shifted)
+  sleep_data <- time_HMS_to_numeric(sleep_data, 3.0, "Sleep_Offset_Time")
+  sleep_data <- sleep_data %>% rename(Sleep_Offset_Time_shifted = timehour_shifted)
+  sleep_onset <- sleep_data$Sleep_Onset_Time_shifted[1]
+  sleep_offset <- sleep_data$Sleep_Offset_Time_shifted[1]
+  p_base <- base_plot(df, x, y, smoothed_vals)
+  p_sleep <- p_base +
+    geom_vline(xintercept = sleep_onset, linetype = "dashed") +
+    geom_vline(xintercept = sleep_offset, linetype = "dashed") +
+    annotate(geom = "rect", xmin = min(x), xmax = sleep_offset, ymin = -Inf, ymax = Inf, fill = "slategray1", alpha = 0.5) +
+    annotate(geom = "rect", xmin = sleep_onset, xmax = max(x), ymin = -Inf, ymax = Inf, fill = "slategray1", alpha = 0.5)
+  return(p_sleep)
+}
+
+
+# Plot with dashed lines representing first and last peaks
+plot_w_peaks <- function(df, x, y, smoothed_vals) {
+  p_base <- base_plot(df, x, y, smoothed_vals)
+  p_peaks <- p_base +
+    geom_vline(xintercept = first_peak, linetype = "dashed") +
+    geom_vline(xintercept = last_peak, linetype = "dashed")
+}
+
+
+# TO EDIT
+# plot_w_dlmo <- function(df, x, y, smoothed_vals) {
+#
+# }
+
+
+# WRAPPER for PLOTTING
+plotting <- function(df) {
+  x <- df$timehour_shifted
+  y <- df$agglogActivity
+  smoothed_vals <- predict(gam_mod, newdata = df)
+  #-- Base plot
+  p_base <- base_plot(df, x, y, smoothed_vals)
+  p_base_name <- paste0(subj, "_GAMplot.jpg")
+  save_plot(p_base_name, p_base)
+  #-- Plot with sleep times
+  p_sleep <- plot_w_sleeptimes(df, x, y, smoothed_vals)
+  p_sleep_name <- paste0(subj, "_GAMplot_sleeptimes.jpg")
+  save_plot(p_sleep_name, p_sleep)
+  #-- Plot with turning points
+  p_tp <- plot_w_peaks(df, x, y, smoothed_vals)
+  p_tp_name <- paste0(subj, "_GAMplot_peaks.jpg")
+  save_plot(p_tp_name, p_tp)
+  #-- Plot with DLMO - TO EDIT
+  # p_dlmo <- plot_w_sleeptimes(df, x, y, smoothed_vals)
+  # p_dlmo_name <- paste0(subj, "_GAMplot_DLMO.jpg")
+  # save_plot(p_dlmo_name, p_dlmo)
+}
+
+
+#----- RUN COMPLETE PROCESS
+# Setup
+
+setwd("/home/UCIactig/data")
+packages <- c("dplyr", "lubridate", "ggplot2", "gratia", "mgcv", "pastecs")
+check.packages(packages)
+
+# Prepare output file
+
+outfile <- "GAMfit_output.csv"
+output_cols <- c(
+  "Subject", "UPslope_time", "UPslope", "DOWNslope_time",
+  "DOWNslope", "FIRSTpeak_time", "LASTpeak_time", "rsq",
+  "percent_missing"
+)
+create_output(outfile, output_cols)
 
 # Get list of files to be processed
+
 file_list <- Sys.glob("*_trimmed.csv")
 
-# Main routine for fitting GAM
-print("Aggregating on MEAN:")
-fit <- lapply(file_list, function (file) {
-    print(paste0("    Working on: ", file))
-    subj <- strsplit(file, '_trimmed.csv')[[1]]
-    df_subj <- read.csv(file)
-    perc_miss <- mean(is.na(df_subj$Activity)) * 100
-    df_subj <- completeFun(df_subj, 'Activity')
-    time_val <- df_subj$Time[1]
-    if (timeCheck(time_val)) {
-        df_subj$Time <- format(strptime(df_subj$Time, "%I:%M:%S %p"), format = "%H:%M:%S")
-    }
-    df_subj$hrs <- as.numeric(format(strptime(df_subj$Time, "%H:%M:%S"), format = "%H"))
-    df_subj$min <- as.numeric(format(strptime(df_subj$Time, "%H:%M:%S"), format = "%M"))
-    df_subj$ss <- as.numeric(format(strptime(df_subj$Time, "%H:%M:%S"), format = "%S"))
-    df_subj$timehour <- df_subj$hrs + (df_subj$min / 60)
-    df_subj$timehour <- round(df_subj$timehour, 2)
-    df_subj$timehour_shifted <- ifelse(df_subj$timehour < 3.0, df_subj$timehour + 24, df_subj$timehour)
-    df_subj$LogActivity <- log10(df_subj$Activity + 1)
-    df_agg <- df_subj %>% 
-        group_by(timehour_shifted) %>%
-        summarise(agglogActivity = mean(LogActivity))
-    gam_mod <- gam(agglogActivity ~ s(timehour_shifted), data = df_agg, method = "REML")
-    n_deriv <- nrow(df_agg) / 2
-    deriv <- derivatives(gam_mod, type = "central", n = n_deriv)
-    max_slope <- deriv[which.max(deriv$derivative),]
-    max_slope_slope <- max_slope$derivative
-    max_slope_time <- max_slope$data
-    min_slope <- deriv[which.min(deriv$derivative),]
-    min_slope_slope <- min_slope$derivative
-    min_slope_time <- min_slope$data
-    rsq <- summary(gam_mod)
-    rsq <- rsq$r.sq
-    
-    # Write output
-    df_out <- df_out %>% add_row("Subject" = subj, "UPslope_time" = round(max_slope_time, 2),
-                                 "UPslope" = round(max_slope_slope, 2), "DOWNslope_time" = round(min_slope_time, 2),
-                                 "DOWNslope" = round(min_slope_slope, 2), "rsq" = round(rsq, 2), 
-                                 "percent_missing" = round(perc_miss, 2))
-    write.table(df_out, "GAMfit_output.csv", sep = ",",
-                col.names = FALSE, append = TRUE, row.names = FALSE)
-    
-    # Checking and plotting
-    rsqstr <- toString(round(rsq, digits = 2))
-    perc_missstr <- toString(round(perc_miss, digits = 2))
-    p_check <- appraise(gam_mod)
-    ggsave(paste0(subj, '_GAMcheck.jpg'), plot = p_check, device = "jpeg", width = 8,
-           height = 6, units = 'in')
-    pred_data <- data.frame(time = df_agg$timehour_shifted,
-                            activity = df_agg$agglogActivity,
-                            predicted_values = predict(gam_mod, newdata = df_agg))
-    p <- ggplot(pred_data, aes(x = time)) + 
-        geom_point(aes(y = activity), size = 1, alpha = 0.5, na.rm=TRUE) +
-        geom_line(aes(y = predicted_values), colour = "red") +
-        geom_vline(xintercept = max_slope_time, linetype="dashed") +
-        geom_vline(xintercept = min_slope_time, linetype="dashed") +
-        xlab('24hr Time (03:00 to 27:00 for model fitting)') +
-        ylab('log(Activity)') +
-        theme_classic() +
-        labs(title = paste0(subj),
-             subtitle = paste0('R2 = ',rsqstr,'; Percent activity missing = ',perc_missstr,'; Aggregated on mean'),
-             caption = "Note: Dashed verticle lines depict calculated time of steepest UP and DOWN slope") +
-        theme(plot.caption = element_text(hjust = 0))
-    ggsave(paste0(subj, '_GAMplot.jpg'), plot = p, device = "jpeg", width = 8,
-           height = 6, units = 'in')
-})
-print('SCRIPT RUN COMPLETE')
+### Run process for all files ###
+
+for (file in file_list) {
+  print(paste0("Working on: ", file))
+  subj <- strsplit(file, "_trimmed.csv")[[1]]
+  df_subj <- read.csv(file)
+  df_agg <- prep_data(df_subj)
+  modelling(df_agg)
+  plotting(df_agg)
+}
+
+print("SCRIPT RUN COMPLETE")

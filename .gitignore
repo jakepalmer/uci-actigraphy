@@ -1,3 +1,7 @@
 *.html
 *.ipynb
+.bash_history
+/.cache
+/.rstudio
+/rstudio
 /data
