@@ -163,7 +163,6 @@ calc_slope <- function(df, mod) {
 
 # Calulate turning points from second derivative
 calc_turn_points <- function(df, mod) {
-  # smoothed_vals <- predict(gam_mod, newdata = df)
   df$smoothed_vals <- predict(mod, newdata = df)
   turns <- pastecs::turnpoints(as.numeric(df$smoothed_vals))
   peaks_time <- df$timehour_shifted[extract(turns, no.tp = FALSE, peak = TRUE, pit = FALSE)]
