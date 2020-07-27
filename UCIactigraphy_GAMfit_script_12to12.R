@@ -4,6 +4,7 @@
 # Email: jake.palmer@sydney.edu.au
 # Last edit: 23.05.2020
 ##########
+# Last edit: Ivy on 08.07.2020
 
 #----- INSTRUCTIONS
 # See associated documentation file - UCIactigraphy_GAMfit_documentation.html
@@ -121,12 +122,12 @@ aggLog <- function(df) {
 
 
 # WRAPPER for PREP STEPS
-prep_data <- function(df) {
+prep_data <- function(df, min_time) {
   df <- handle_missing(df)
   if (timeCheck(df$Time[1])) {
     df$Time <- format(strptime(df$Time, "%I:%M:%S %p"), format = "%H:%M:%S")
   }
-  df <- time_HMS_to_numeric(df, min_time = 12.0, "Time")
+  df <- time_HMS_to_numeric(df, min_time, "Time")
   df <- aggLog(df)
   return(df)
 }
@@ -146,7 +147,7 @@ fit_model <- function(formula, df) {
 
 
 # Calculate UP/DOWN slope values and times
-calc_slope <- function(df, mod) {
+calc_slope <- function(df, mod, min_time) {
   # n_deriv <- nrow(df) / 2
   n_deriv <- nrow(df)
   first_deriv <- gratia::derivatives(mod, type = "central", n = n_deriv, order = 1)
@@ -155,10 +156,10 @@ calc_slope <- function(df, mod) {
   DOWNdf <- subset(first_deriv, data <= 15.0)
   UP <- UPdf[which.max(UPdf$derivative), ]
   UPslope <- UP$derivative
-  UPtime <- UP$data
+  UPtime <- UP$data - min_time
   DOWN <- DOWNdf[which.min(DOWNdf$derivative), ]
   DOWNslope <- DOWN$derivative
-  DOWNtime <- DOWN$data
+  DOWNtime <- DOWN$data + min_time
   assign("UPslope", UPslope, envir = .GlobalEnv)
   assign("UPtime", UPtime, envir = .GlobalEnv)
   assign("DOWNslope", DOWNslope, envir = .GlobalEnv)
@@ -197,9 +198,9 @@ write_output <- function(outfile) {
 
 
 # WRAPPER for MODEL FITTING
-modelling <- function(df) {
+modelling <- function(df, min_time) {
   mod <- fit_model(formula = agglogActivity ~ s(timehour_shifted), df = df_agg)
-  calc_slope(df_agg, mod)
+  calc_slope(df_agg, mod, min_time)
   calc_turn_points(df_agg, mod, UPtime, DOWNtime)
   write_output(outfile)
   p_check <- appraise(mod)
@@ -230,7 +231,7 @@ base_plot <- function(df, x, y, smoothed_vals) {
 
 # Plot with shaded habitual sleep periods, builds on base plot
 plot_w_sleeptimes <- function(df, x, y, smoothed_vals) {
-  sleep_data <- read.csv("SPRiNT_actigraphy SLEEP.csv") %>% filter(ID == subj)
+  sleep_data <- read.csv("SPRiNT_actigraphy SLEEP_20200521.csv") %>% filter(ID == subj)
   sleep_data <- time_HMS_to_numeric(sleep_data, min_time = 12.0, "Sleep_Onset_Time")
   sleep_data <- sleep_data %>% rename(Sleep_Onset_Time_shifted = timehour_shifted)
   sleep_data <- time_HMS_to_numeric(sleep_data, 12.0, "Sleep_Offset_Time")
@@ -239,9 +240,8 @@ plot_w_sleeptimes <- function(df, x, y, smoothed_vals) {
   sleep_offset <- sleep_data$Sleep_Offset_Time_shifted[1]
   p_base <- base_plot(df, x, y, smoothed_vals)
   p_sleep <- p_base +
-    geom_vline(xintercept = sleep_onset, linetype = "dashed") +
-    geom_vline(xintercept = sleep_offset, linetype = "dashed") +
-    annotate(geom = "rect", xmin = sleep_onset, xmax = sleep_offset, ymin = -Inf, ymax = Inf, fill = "slategray1", alpha = 0.5)
+    annotate(geom = "rect", xmin = sleep_onset, xmax = sleep_offset, ymin = -Inf, ymax = Inf, fill = "slategray1", alpha = 0.5) +
+    annotate(geom = "text", x = (sleep_onset + sleep_offset) / 2, y = 2, label = "Habitual sleep period") 
   return(p_sleep)
 }
 
@@ -264,10 +264,47 @@ plot_w_slopes <- function(df, x, y, smoothed_vals) {
 }
 
 
-# TO EDIT
-# plot_w_dlmo <- function(df, x, y, smoothed_vals) {
-#
-# }
+# Plot with DLMO time and raw melatonin concentrations
+plot_w_dlmo <- function(df, x, y, smoothed_vals) {
+  dlmo_data <- read.csv("DLMO_FINAL.csv") %>% filter(ID == subj)
+  dlmo_data <- time_HMS_to_numeric(dlmo_data, min_time = 12.0, "DLMO_Time")
+  dlmo_data <- dlmo_data %>% rename(DLMO_Time_shifted = timehour_shifted)
+  dlmo_time <- dlmo_data$DLMO_Time_shifted[1]
+  mela_data <- read.csv("Melatonin_FINAL.csv") %>% filter(ID == subj)
+  mela_data <- time_HMS_to_numeric(mela_data, min_time = 12.0, "Collection_Time")
+  mela_data <- mela_data %>% rename(Collection_Time_shifted = timehour_shifted)
+  mela_time <- mela_data$Collection_Time_shifted[1:7]
+  melatonin_data <- data.frame(time = mela_time,
+                               melatonin = mela_data$Concentration)
+  p_base <- base_plot(df, x, y, smoothed_vals)
+  p_dlmo <- p_base +
+    geom_vline(xintercept = dlmo_time, col = "turquoise4") + 
+    annotate(geom = "label", x = dlmo_time, y = 1.5, label = "DLMO", col = "turquoise4") +
+    geom_point(data = melatonin_data, aes(x = mela_time, y = melatonin/20), color = "turquoise4") +
+    geom_line(data = melatonin_data, aes(x = mela_time, y = melatonin/20), color = "turquoise4", size = 0.8) +
+    scale_y_continuous(sec.axis = sec_axis(~.*20, name = "Salivary Melatonin (pg/mL)")) + 
+    geom_segment(aes(x = 8, y = 4/20, xend = Inf, yend = 4/20), linetype = "dashed", color = "turquoise4") +
+    annotate(geom = "text", x = 23, y = 5.5/20, label = "Threshold: 4 pg/mL", color = "turquoise4", size = 3)
+  return(p_dlmo)
+}
+
+
+# Final plot 1- base plot with shaded habitual sleep period, UP and DOWN slopes
+plot_final1 <- function(df, x, y, smoothed_vals) {
+  p_sleep <- plot_w_sleeptimes(df, x, y, smoothed_vals)
+  p_final1 <- p_sleep +
+    geom_vline(xintercept = UPtime, linetype = "dashed") +
+    geom_vline(xintercept = DOWNtime, linetype = "dashed")
+}
+
+
+# Final plot 2- base plot with shaded habitual sleep period, UP and DOWN slopes, DLMO and melatonin (reversed Yaxis)
+plot_final2 <- function(df, x, y, smoothed_vals) {
+  p_sleep <- plot_w_sleeptimes(df, x, y, smoothed_vals)
+  p_final2 <- p_sleep +
+    geom_vline(xintercept = UPtime, linetype = "dashed") +
+    geom_vline(xintercept = DOWNtime, linetype = "dashed")
+}
 
 
 # WRAPPER for PLOTTING
@@ -291,17 +328,21 @@ plotting <- function(df) {
   p_sleep <- plot_w_sleeptimes(df, x, y, smoothed_vals)
   p_sleep_name <- paste0(subj, "_GAMplot_sleeptimes.jpg")
   save_plot(p_sleep_name, p_sleep)
-  #-- Plot with DLMO - TO EDIT
-  # p_dlmo <- plot_w_sleeptimes(df, x, y, smoothed_vals)
-  # p_dlmo_name <- paste0(subj, "_GAMplot_DLMO.jpg")
-  # save_plot(p_dlmo_name, p_dlmo)
+  #-- Plot with DLMO and melatonin concentrations
+  p_dlmo <- plot_w_dlmo(df, x, y, smoothed_vals)
+  p_dlmo_name <- paste0(subj, "_GAMplot_DLMO.jpg")
+  save_plot(p_dlmo_name, p_dlmo)
+  #-- Final plot option 1 (sleep times, UP and DOWN slopes)
+  p_final1 <-plot_final1(df, x, y, smoothed_vals)
+  p_final1_name <- paste0(subj, "_GAMplot_final1.jpg")
+  save_plot(p_final1_name, p_final1)
 }
 
 
 #----- RUN COMPLETE PROCESS
 # Setup
 
-setwd("/home/UCIactig/data")
+setwd("/Users/cheniy1/Desktop/test11/")
 packages <- c("dplyr", "lubridate", "ggplot2", "gratia", "mgcv", "pastecs")
 check.packages(packages)
 
@@ -321,12 +362,14 @@ file_list <- Sys.glob("*_trimmed.csv")
 
 ### Run process for all files ###
 
+min_time = 12.0
+
 for (file in file_list) {
   print(paste0("Working on: ", file))
   subj <- strsplit(file, "_trimmed.csv")[[1]]
   df_subj <- read.csv(file)
-  df_agg <- prep_data(df_subj)
-  modelling(df_agg)
+  df_agg <- prep_data(df_subj, min_time)
+  modelling(df_agg, min_time)
   plotting(df_agg)
 }
 
